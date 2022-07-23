@@ -17,13 +17,11 @@ import (
 	"strings"
 	"time"
 
-	"cloud.google.com/go/profiler"
 	"github.com/go-sql-driver/mysql"
 	"github.com/gofrs/flock"
 	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
-	"github.com/labstack/gommon/log"
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
@@ -116,19 +114,8 @@ func SetCacheControlPrivate(next echo.HandlerFunc) echo.HandlerFunc {
 	}
 }
 
-func initProfiler() {
-	if err := profiler.Start(profiler.Config{
-		Service:        "isucon12-q",
-		ServiceVersion: "1.0.0",
-		ProjectID:      "isucon9-final",
-	}); err != nil {
-		log.Fatal(err)
-	}
-}
-
 // Run は cmd/isuports/main.go から呼ばれるエントリーポイントです
 func Run() {
-	initProfiler()
 	e := echo.New()
 
 	var (
@@ -145,7 +132,7 @@ func Run() {
 	}
 	defer sqlLogger.Close()
 
-	e.Use(middleware.Logger())
+	// e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 	e.Use(SetCacheControlPrivate)
 
