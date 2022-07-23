@@ -2,13 +2,13 @@ services:
   webapp:
     build: ./go
     environment:
-      ISUCON_DB_HOST: 127.0.0.1
+      ISUCON_DB_HOST: 192.168.0.12
       ISUCON_DB_PORT: 3306
       ISUCON_DB_USER: isucon
       ISUCON_DB_PASSWORD: isucon
       ISUCON_DB_NAME: isuports
       GOOGLE_APPLICATION_CREDENTIALS: /home/isucon/tmp/service-account.json
-      ISUCON_DB_HOST_TENANT: 127.0.0.1
+      ISUCON_DB_HOST_TENANT: 192.168.0.13
     network_mode: host
     volumes:
       - /home/isucon/webapp/tenant_db:/home/isucon/webapp/tenant_db
