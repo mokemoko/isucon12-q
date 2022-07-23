@@ -1090,7 +1090,7 @@ func competitionScoreHandler(c echo.Context) error {
 
 	tx, err := tenantDB.Beginx()
 	if err != nil {
-		fail(err)
+		return fail(err)
 	}
 	defer tx.Rollback()
 
@@ -1100,7 +1100,7 @@ func competitionScoreHandler(c echo.Context) error {
 		v.tenantID,
 		competitionID,
 	); err != nil {
-		fail(err)
+		return fail(err)
 	}
 
 	playerScoreMap := map[string]PlayerScoreRow{}
@@ -1116,11 +1116,11 @@ func competitionScoreHandler(c echo.Context) error {
 		"INSERT INTO player_score (id, tenant_id, player_id, competition_id, score, row_num, created_at, updated_at) VALUES (:id, :tenant_id, :player_id, :competition_id, :score, :row_num, :created_at, :updated_at)",
 		scores,
 	); err != nil {
-		fail(err)
+		return fail(err)
 	}
 	err = tx.Commit();
 	if err != nil {
-		fail(err)
+		return fail(err)
 	}
 
 	return c.JSON(http.StatusOK, SuccessResult{
