@@ -187,7 +187,7 @@ func Run() {
 		return
 	}
 	adminDB.SetMaxOpenConns(100)
-	tenantDB.SetMaxIdleConns(100)
+	adminDB.SetMaxIdleConns(100)
 	defer adminDB.Close()
 
 	tenantDB, err = connectToTenantDB()
