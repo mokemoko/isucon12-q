@@ -1108,8 +1108,8 @@ func competitionScoreHandler(c echo.Context) error {
 	}
 
 	playerScoreMap := map[string]PlayerScoreRow{}
-	for _, ps := range playerScoreRows {
-		playerScoreMap[ps.PlayerID] = ps
+	for i := range playerScoreRows {
+		playerScoreMap[playerScoreRows[i].PlayerID] = playerScoreRows[i]
 	}
 	scores := []PlayerScoreRow{}
 	for _, score := range playerScoreMap {
