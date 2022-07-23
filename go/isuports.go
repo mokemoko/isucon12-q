@@ -414,10 +414,10 @@ type CompetitionRow struct {
 }
 
 // 大会を取得する
-func retrieveCompetition(ctx context.Context, tenantDB dbOrTx, id string) (*CompetitionRow, error) {
+func retrieveCompetition(ctx context.Context, tenantDB dbOrTx, tenant_id int64, id string) (*CompetitionRow, error) {
 	var c CompetitionRow
-	if err := tenantDB.GetContext(ctx, &c, "SELECT * FROM competition WHERE id = ?", id); err != nil {
-		return nil, fmt.Errorf("error Select competition: id=%s, %w", id, err)
+	if err := tenantDB.GetContext(ctx, &c, "SELECT * FROM competition WHERE tenant_id = ? AND id = ?", tenant_id, id); err != nil {
+		return nil, fmt.Errorf("error Select competition: tenant_id=%d, id=%s, %w", tenant_id, id, err)
 	}
 	return &c, nil
 }
@@ -984,7 +984,7 @@ func competitionFinishHandler(c echo.Context) error {
 	if id == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "competition_id required")
 	}
-	_, err = retrieveCompetition(ctx, tenantDB, id)
+	_, err = retrieveCompetition(ctx, tenantDB, v.tenantID, id)
 	if err != nil {
 		// 存在しない大会
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1034,7 +1034,7 @@ func competitionScoreHandler(c echo.Context) error {
 	if competitionID == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "competition_id required")
 	}
-	comp, err := retrieveCompetition(ctx, tenantDB, competitionID)
+	comp, err := retrieveCompetition(ctx, tenantDB, v.tenantID, competitionID)
 	if err != nil {
 		// 存在しない大会
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1291,11 +1291,17 @@ func playerHandler(c echo.Context) error {
 	}
 
 	psds := make([]PlayerScoreDetail, 0, len(pss))
+	comps, err := retrieveCompetitions(ctx, tenantDB, v.tenantID)
+	if err != nil {
+		return fmt.Errorf("error retrieveCompetitions: %w", err)
+	}
+	compMap := map[string]*CompetitionRow{}
+	for i := range comps {
+		comp := comps[i]
+		compMap[comp.ID] = &comp
+	}
 	for _, ps := range pss {
-		comp, err := retrieveCompetition(ctx, tenantDB, ps.CompetitionID)
-		if err != nil {
-			return fmt.Errorf("error retrieveCompetition: %w", err)
-		}
+		comp := compMap[ps.CompetitionID]
 		psds = append(psds, PlayerScoreDetail{
 			CompetitionTitle: comp.Title,
 			Score:            ps.Score,
@@ -1358,7 +1364,7 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 
 	// 大会の存在確認
-	competition, err := retrieveCompetition(ctx, tenantDB, competitionID)
+	competition, err := retrieveCompetition(ctx, tenantDB, v.tenantID, competitionID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return echo.NewHTTPError(http.StatusNotFound, "competition not found")
