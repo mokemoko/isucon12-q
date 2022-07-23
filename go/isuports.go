@@ -1238,7 +1238,7 @@ func playerHandler(c echo.Context) error {
 	}
 	defer fl.Close()
 	var psstmp []PlayerScoreRow
-	if err := tenantDB.GetContext(
+	if err := tenantDB.SelectContext(
 		ctx,
 		&psstmp,
 		"SELECT * FROM player_score WHERE tenant_id = ? AND player_id = ?",
