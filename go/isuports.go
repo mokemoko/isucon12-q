@@ -131,8 +131,6 @@ func initProfiler() {
 func Run() {
 	initProfiler()
 	e := echo.New()
-	e.Debug = true
-	e.Logger.SetLevel(log.DEBUG)
 
 	var (
 		sqlLogger io.Closer
