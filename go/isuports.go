@@ -1291,13 +1291,9 @@ func playerHandler(c echo.Context) error {
 	}
 
 	psds := make([]PlayerScoreDetail, 0, len(pss))
-	comps, err := retrieveCompetitions(ctx, tenantDB, v.tenantID)
-	if err != nil {
-		return fmt.Errorf("error retrieveCompetitions: %w", err)
-	}
 	compMap := map[string]*CompetitionRow{}
-	for i := range comps {
-		comp := comps[i]
+	for i := range cs {
+		comp := cs[i]
 		compMap[comp.ID] = &comp
 	}
 	for _, ps := range pss {
