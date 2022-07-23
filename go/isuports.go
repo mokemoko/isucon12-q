@@ -380,18 +380,32 @@ type PlayerRow struct {
 }
 
 // 参加者を取得する
-func retrievePlayer(ctx context.Context, tenantDB dbOrTx, id string) (*PlayerRow, error) {
+func retrievePlayer(ctx context.Context, tenantDB dbOrTx, tenant_id int64, id string) (*PlayerRow, error) {
 	var p PlayerRow
-	if err := tenantDB.GetContext(ctx, &p, "SELECT * FROM player WHERE id = ?", id); err != nil {
-		return nil, fmt.Errorf("error Select player: id=%s, %w", id, err)
+	if err := tenantDB.GetContext(ctx, &p, "SELECT * FROM player WHERE tenant_id = ? AND id = ?", tenant_id, id); err != nil {
+		return nil, fmt.Errorf("error Select player: tenant_id=%d, id=%s, %w", tenant_id, id, err)
 	}
 	return &p, nil
 }
 
+// tenant の参加者を取得する
+func retrievePlayerMap(ctx context.Context, tenantDB dbOrTx, tenant_id int64) (map[string]*PlayerRow, error) {
+	var ps []PlayerRow
+	if err := tenantDB.SelectContext(ctx, &ps, "SELECT * FROM player WHERE tenant_id = ?", tenant_id); err != nil {
+		return nil, fmt.Errorf("error Select players: tenant_id=%d, %w", tenant_id, err)
+	}
+	m := map[string]*PlayerRow{}
+	for i := range ps {
+		p := ps[i]
+		m[p.ID] = &p
+	}
+	return m, nil
+}
+
 // 参加者を認可する
 // 参加者向けAPIで呼ばれる
-func authorizePlayer(ctx context.Context, tenantDB dbOrTx, id string) error {
-	player, err := retrievePlayer(ctx, tenantDB, id)
+func authorizePlayer(ctx context.Context, tenantDB dbOrTx, tenant_id int64, id string) error {
+	player, err := retrievePlayer(ctx, tenantDB, tenant_id, id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return echo.NewHTTPError(http.StatusUnauthorized, "player not found")
@@ -804,6 +818,9 @@ func playersAddHandler(c echo.Context) error {
 	displayNames := params["display_name[]"]
 
 	pds := make([]PlayerDetail, 0, len(displayNames))
+
+	// TODO: bulk insert
+	// retrievePlayer は不要
 	for _, displayName := range displayNames {
 		id, err := dispenseID(ctx)
 		if err != nil {
@@ -821,7 +838,7 @@ func playersAddHandler(c echo.Context) error {
 				id, displayName, false, now, now, err,
 			)
 		}
-		p, err := retrievePlayer(ctx, tenantDB, id)
+		p, err := retrievePlayer(ctx, tenantDB, v.tenantID, id)
 		if err != nil {
 			return fmt.Errorf("error retrievePlayer: %w", err)
 		}
@@ -873,7 +890,7 @@ func playerDisqualifiedHandler(c echo.Context) error {
 			true, now, playerID, err,
 		)
 	}
-	p, err := retrievePlayer(ctx, tenantDB, playerID)
+	p, err := retrievePlayer(ctx, tenantDB, v.tenantID, playerID)
 	if err != nil {
 		// 存在しないプレイヤー
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1061,6 +1078,12 @@ func competitionScoreHandler(c echo.Context) error {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
 	defer fl.Close()
+
+	playerMap, err := retrievePlayerMap(ctx, tenantDB, v.tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to retrievePlayerMap: tenant_id = %d, %w", v.tenantID, err)
+	}
+
 	var rowNum int64
 	playerScoreRows := []PlayerScoreRow{}
 	for {
@@ -1076,15 +1099,12 @@ func competitionScoreHandler(c echo.Context) error {
 			return fmt.Errorf("row must have two columns: %#v", row)
 		}
 		playerID, scoreStr := row[0], row[1]
-		if _, err := retrievePlayer(ctx, tenantDB, playerID); err != nil {
-			// 存在しない参加者が含まれている
-			if errors.Is(err, sql.ErrNoRows) {
-				return echo.NewHTTPError(
-					http.StatusBadRequest,
-					fmt.Sprintf("player not found: %s", playerID),
-				)
-			}
-			return fmt.Errorf("error retrievePlayer: %w", err)
+
+		if _, ok := playerMap[playerID]; !ok {
+			return echo.NewHTTPError(
+				http.StatusBadRequest,
+				fmt.Sprintf("player not found: %s", playerID),
+			)
 		}
 		var score int64
 		if score, err = strconv.ParseInt(scoreStr, 10, 64); err != nil {
@@ -1218,7 +1238,7 @@ func playerHandler(c echo.Context) error {
 	}
 	defer tenantDB.Close()
 
-	if err := authorizePlayer(ctx, tenantDB, v.playerID); err != nil {
+	if err := authorizePlayer(ctx, tenantDB, v.tenantID, v.playerID); err != nil {
 		return err
 	}
 
@@ -1226,7 +1246,7 @@ func playerHandler(c echo.Context) error {
 	if playerID == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "player_id is required")
 	}
-	p, err := retrievePlayer(ctx, tenantDB, playerID)
+	p, err := retrievePlayer(ctx, tenantDB, v.tenantID, playerID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return echo.NewHTTPError(http.StatusNotFound, "player not found")
@@ -1328,7 +1348,7 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 	defer tenantDB.Close()
 
-	if err := authorizePlayer(ctx, tenantDB, v.playerID); err != nil {
+	if err := authorizePlayer(ctx, tenantDB, v.tenantID, v.playerID); err != nil {
 		return err
 	}
 
@@ -1389,6 +1409,10 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 	ranks := make([]CompetitionRank, 0, len(pss))
 	scoredPlayerSet := make(map[string]struct{}, len(pss))
+	playerMap, err := retrievePlayerMap(ctx, tenantDB, v.tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to retrievePlayerMap: %w", err)
+	}
 	for _, ps := range pss {
 		// player_scoreが同一player_id内ではrow_numの降順でソートされているので
 		// 現れたのが2回目以降のplayer_idはより大きいrow_numでスコアが出ているとみなせる
@@ -1396,10 +1420,7 @@ func competitionRankingHandler(c echo.Context) error {
 			continue
 		}
 		scoredPlayerSet[ps.PlayerID] = struct{}{}
-		p, err := retrievePlayer(ctx, tenantDB, ps.PlayerID)
-		if err != nil {
-			return fmt.Errorf("error retrievePlayer: %w", err)
-		}
+		p := playerMap[ps.PlayerID]
 		ranks = append(ranks, CompetitionRank{
 			Score:             ps.Score,
 			PlayerID:          p.ID,
@@ -1467,7 +1488,7 @@ func playerCompetitionsHandler(c echo.Context) error {
 	}
 	defer tenantDB.Close()
 
-	if err := authorizePlayer(ctx, tenantDB, v.playerID); err != nil {
+	if err := authorizePlayer(ctx, tenantDB, v.tenantID, v.playerID); err != nil {
 		return err
 	}
 	return competitionsHandler(c, v, tenantDB)
@@ -1581,7 +1602,7 @@ func meHandler(c echo.Context) error {
 		return fmt.Errorf("error connectToTenantDB: %w", err)
 	}
 	ctx := context.Background()
-	p, err := retrievePlayer(ctx, tenantDB, v.playerID)
+	p, err := retrievePlayer(ctx, tenantDB, v.tenantID, v.playerID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.JSON(http.StatusOK, SuccessResult{
