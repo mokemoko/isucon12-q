@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"cloud.google.com/go/profiler"
 	"github.com/go-sql-driver/mysql"
 	"github.com/gofrs/flock"
 	"github.com/jmoiron/sqlx"
@@ -131,8 +132,19 @@ func SetCacheControlPrivate(next echo.HandlerFunc) echo.HandlerFunc {
 	}
 }
 
+func initProfiler() {
+	if err := profiler.Start(profiler.Config{
+		Service:        "isucon12-q",
+		ServiceVersion: "1.0.0",
+		ProjectID:      "isucon9-final",
+	}); err != nil {
+		log.Fatal(err)
+	}
+}
+
 // Run は cmd/isuports/main.go から呼ばれるエントリーポイントです
 func Run() {
+	initProfiler()
 	e := echo.New()
 	e.Debug = true
 	e.Logger.SetLevel(log.DEBUG)
