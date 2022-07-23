@@ -1084,10 +1084,15 @@ func competitionScoreHandler(c echo.Context) error {
 		})
 	}
 
+	fail := func(err error) error {
+        return fmt.Errorf("error insert player_score: %v", err)
+    }
+
 	tx, err := tenantDB.Beginx()
 	if err != nil {
-		return fmt.Errorf("error begin transaction: %w", err)
+		fail(err)
 	}
+	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(
 		ctx,
@@ -1095,7 +1100,7 @@ func competitionScoreHandler(c echo.Context) error {
 		v.tenantID,
 		competitionID,
 	); err != nil {
-		return fmt.Errorf("error Delete player_score: tenantID=%d, competitionID=%s, %w", v.tenantID, competitionID, err)
+		fail(err)
 	}
 
 	playerScoreMap := map[string]PlayerScoreRow{}
@@ -1114,10 +1119,14 @@ func competitionScoreHandler(c echo.Context) error {
 		return fmt.Errorf(
 			"error Insert player_score: , %w", err,
 		)
+		err = tx.Rollback();
+		return fmt.Errorf(
+			"error rollback: , %w", err,
+		)
 	}
 	err = tx.Commit();
 	if err != nil {
-		return fmt.Errorf("error commit player_score: %w", err)
+		fail(err)
 	}
 
 	return c.JSON(http.StatusOK, SuccessResult{
