@@ -28,6 +28,8 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
+
+	"github.com/oklog/ulid/v2"
 )
 
 const (
@@ -104,28 +106,7 @@ func createTenantDB(id int64) error {
 
 // システム全体で一意なIDを生成する
 func dispenseID(ctx context.Context) (string, error) {
-	var id int64
-	var lastErr error
-	for i := 0; i < 100; i++ {
-		var ret sql.Result
-		ret, err := adminDB.ExecContext(ctx, "REPLACE INTO id_generator (stub) VALUES (?);", "a")
-		if err != nil {
-			if merr, ok := err.(*mysql.MySQLError); ok && merr.Number == 1213 { // deadlock
-				lastErr = fmt.Errorf("error REPLACE INTO id_generator: %w", err)
-				continue
-			}
-			return "", fmt.Errorf("error REPLACE INTO id_generator: %w", err)
-		}
-		id, err = ret.LastInsertId()
-		if err != nil {
-			return "", fmt.Errorf("error ret.LastInsertId: %w", err)
-		}
-		break
-	}
-	if id != 0 {
-		return fmt.Sprintf("%x", id), nil
-	}
-	return "", lastErr
+	return ulid.Make().String(), nil
 }
 
 // 全APIにCache-Control: privateを設定する
@@ -394,18 +375,32 @@ type PlayerRow struct {
 }
 
 // 参加者を取得する
-func retrievePlayer(ctx context.Context, tenantDB dbOrTx, id string) (*PlayerRow, error) {
+func retrievePlayer(ctx context.Context, tenantDB dbOrTx, tenant_id int64, id string) (*PlayerRow, error) {
 	var p PlayerRow
-	if err := tenantDB.GetContext(ctx, &p, "SELECT * FROM player WHERE id = ?", id); err != nil {
-		return nil, fmt.Errorf("error Select player: id=%s, %w", id, err)
+	if err := tenantDB.GetContext(ctx, &p, "SELECT * FROM player WHERE tenant_id = ? AND id = ?", tenant_id, id); err != nil {
+		return nil, fmt.Errorf("error Select player: tenant_id=%d, id=%s, %w", tenant_id, id, err)
 	}
 	return &p, nil
 }
 
+// tenant の参加者を取得する
+func retrievePlayerMap(ctx context.Context, tenantDB dbOrTx, tenant_id int64) (map[string]*PlayerRow, error) {
+	var ps []PlayerRow
+	if err := tenantDB.SelectContext(ctx, &ps, "SELECT * FROM player WHERE tenant_id = ?", tenant_id); err != nil {
+		return nil, fmt.Errorf("error Select players: tenant_id=%d, %w", tenant_id, err)
+	}
+	m := map[string]*PlayerRow{}
+	for i := range ps {
+		p := ps[i]
+		m[p.ID] = &p
+	}
+	return m, nil
+}
+
 // 参加者を認可する
 // 参加者向けAPIで呼ばれる
-func authorizePlayer(ctx context.Context, tenantDB dbOrTx, id string) error {
-	player, err := retrievePlayer(ctx, tenantDB, id)
+func authorizePlayer(ctx context.Context, tenantDB dbOrTx, tenant_id int64, id string) error {
+	player, err := retrievePlayer(ctx, tenantDB, tenant_id, id)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return echo.NewHTTPError(http.StatusUnauthorized, "player not found")
@@ -428,12 +423,20 @@ type CompetitionRow struct {
 }
 
 // 大会を取得する
-func retrieveCompetition(ctx context.Context, tenantDB dbOrTx, id string) (*CompetitionRow, error) {
+func retrieveCompetition(ctx context.Context, tenantDB dbOrTx, tenant_id int64, id string) (*CompetitionRow, error) {
 	var c CompetitionRow
-	if err := tenantDB.GetContext(ctx, &c, "SELECT * FROM competition WHERE id = ?", id); err != nil {
-		return nil, fmt.Errorf("error Select competition: id=%s, %w", id, err)
+	if err := tenantDB.GetContext(ctx, &c, "SELECT * FROM competition WHERE tenant_id = ? AND id = ?", tenant_id, id); err != nil {
+		return nil, fmt.Errorf("error Select competition: tenant_id=%d, id=%s, %w", tenant_id, id, err)
 	}
 	return &c, nil
+}
+
+func retrieveCompetitions(ctx context.Context, tenantDB dbOrTx, tenantId int64) ([]CompetitionRow, error) {
+	var cs []CompetitionRow
+	if err := tenantDB.SelectContext(ctx, &cs, "SELECT * FROM competition WHERE tenant_id = ?", tenantId); err != nil {
+		return nil, fmt.Errorf("error Select competition: tenant_id=%d, %w", tenantId, err)
+	}
+	return cs, nil
 }
 
 type PlayerScoreRow struct {
@@ -559,15 +562,20 @@ type VisitHistoryRow struct {
 }
 
 type VisitHistorySummaryRow struct {
-	PlayerID     string `db:"player_id"`
-	MinCreatedAt int64  `db:"min_created_at"`
+	CompetitionID string `db:"competition_id"`
+	PlayerID      string `db:"player_id"`
+	MinCreatedAt  int64  `db:"min_created_at"`
 }
 
-// 大会ごとの課金レポートを計算する
-func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID int64, competitonID string) (*BillingReport, error) {
-	comp, err := retrieveCompetition(ctx, tenantDB, competitonID)
+func billingReportByTenant(ctx context.Context, tenantDB dbOrTx, tenantID int64) ([]BillingReport, error) {
+	comps, err := retrieveCompetitions(ctx, tenantDB, tenantID)
 	if err != nil {
-		return nil, fmt.Errorf("error retrieveCompetition: %w", err)
+		return nil, fmt.Errorf("error retrieveCompetitions: %w", err)
+	}
+	compMap := map[string]*CompetitionRow{}
+	for i := range comps {
+		comp := comps[i]
+		compMap[comp.ID] = &comp
 	}
 
 	// ランキングにアクセスした参加者のIDを取得する
@@ -575,19 +583,23 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 	if err := adminDB.SelectContext(
 		ctx,
 		&vhs,
-		"SELECT player_id, MIN(created_at) AS min_created_at FROM visit_history WHERE tenant_id = ? AND competition_id = ? GROUP BY player_id",
+		"SELECT competition_id, player_id, MIN(created_at) AS min_created_at FROM visit_history WHERE tenant_id = ? GROUP BY competition_id, player_id",
 		tenantID,
-		comp.ID,
 	); err != nil && err != sql.ErrNoRows {
-		return nil, fmt.Errorf("error Select visit_history: tenantID=%d, competitionID=%s, %w", tenantID, comp.ID, err)
+		return nil, fmt.Errorf("error Select visit_history: tenantID=%d, %w", tenantID, err)
 	}
-	billingMap := map[string]string{}
+	billingMap := map[string]map[string]string{}
+	for i := range comps {
+		comp := comps[i]
+		billingMap[comp.ID] = map[string]string{}
+	}
 	for _, vh := range vhs {
+		comp := compMap[vh.CompetitionID]
 		// competition.finished_atよりもあとの場合は、終了後に訪問したとみなして大会開催内アクセス済みとみなさない
 		if comp.FinishedAt.Valid && comp.FinishedAt.Int64 < vh.MinCreatedAt {
 			continue
 		}
-		billingMap[vh.PlayerID] = "visitor"
+		billingMap[comp.ID][vh.PlayerID] = "visitor"
 	}
 
 	// player_scoreを読んでいるときに更新が走ると不整合が起こるのでロックを取得する
@@ -598,41 +610,47 @@ func billingReportByCompetition(ctx context.Context, tenantDB dbOrTx, tenantID i
 	defer fl.Close()
 
 	// スコアを登録した参加者のIDを取得する
-	scoredPlayerIDs := []string{}
+	scoredPlayers := []VisitHistorySummaryRow{}
 	if err := tenantDB.SelectContext(
 		ctx,
-		&scoredPlayerIDs,
-		"SELECT DISTINCT(player_id) FROM player_score WHERE tenant_id = ? AND competition_id = ?",
-		tenantID, comp.ID,
+		&scoredPlayers,
+		"SELECT competition_id, player_id FROM player_score WHERE tenant_id = ? GROUP BY competition_id, player_id",
+		tenantID,
 	); err != nil && err != sql.ErrNoRows {
-		return nil, fmt.Errorf("error Select count player_score: tenantID=%d, competitionID=%s, %w", tenantID, competitonID, err)
+		return nil, fmt.Errorf("error Select count player_score: tenantID=%d, %w", tenantID, err)
 	}
-	for _, pid := range scoredPlayerIDs {
+	for i := range scoredPlayers {
+		p := scoredPlayers[i]
 		// スコアが登録されている参加者
-		billingMap[pid] = "player"
+		billingMap[p.CompetitionID][p.PlayerID] = "player"
 	}
 
 	// 大会が終了している場合のみ請求金額が確定するので計算する
-	var playerCount, visitorCount int64
-	if comp.FinishedAt.Valid {
-		for _, category := range billingMap {
-			switch category {
-			case "player":
-				playerCount++
-			case "visitor":
-				visitorCount++
+	var result []BillingReport
+	for i := range comps {
+		comp := comps[i]
+		var playerCount, visitorCount int64
+		if comp.FinishedAt.Valid {
+			for _, category := range billingMap[comp.ID] {
+				switch category {
+				case "player":
+					playerCount++
+				case "visitor":
+					visitorCount++
+				}
 			}
 		}
+		result = append(result, BillingReport{
+			CompetitionID:     comp.ID,
+			CompetitionTitle:  comp.Title,
+			PlayerCount:       playerCount,
+			VisitorCount:      visitorCount,
+			BillingPlayerYen:  100 * playerCount, // スコアを登録した参加者は100円
+			BillingVisitorYen: 10 * visitorCount, // ランキングを閲覧だけした(スコアを登録していない)参加者は10円
+			BillingYen:        100*playerCount + 10*visitorCount,
+		})
 	}
-	return &BillingReport{
-		CompetitionID:     comp.ID,
-		CompetitionTitle:  comp.Title,
-		PlayerCount:       playerCount,
-		VisitorCount:      visitorCount,
-		BillingPlayerYen:  100 * playerCount, // スコアを登録した参加者は100円
-		BillingVisitorYen: 10 * visitorCount, // ランキングを閲覧だけした(スコアを登録していない)参加者は10円
-		BillingYen:        100*playerCount + 10*visitorCount,
-	}, nil
+	return result, nil
 }
 
 type TenantWithBilling struct {
@@ -698,21 +716,12 @@ func tenantsBillingHandler(c echo.Context) error {
 				Name:        t.Name,
 				DisplayName: t.DisplayName,
 			}
-			cs := []CompetitionRow{}
-			if err := tenantDB.SelectContext(
-				ctx,
-				&cs,
-				"SELECT * FROM competition WHERE tenant_id=?",
-				t.ID,
-			); err != nil {
-				return fmt.Errorf("failed to Select competition: %w", err)
+			reports, err := billingReportByTenant(ctx, tenantDB, t.ID)
+			if err != nil {
+				return fmt.Errorf("failed to billingReportByTenant: %w", err)
 			}
-			for _, comp := range cs {
-				report, err := billingReportByCompetition(ctx, tenantDB, t.ID, comp.ID)
-				if err != nil {
-					return fmt.Errorf("failed to billingReportByCompetition: %w", err)
-				}
-				tb.BillingYen += report.BillingYen
+			for i := range reports {
+				tb.BillingYen += reports[i].BillingYen
 			}
 			tenantBillings = append(tenantBillings, tb)
 			return nil
@@ -801,6 +810,9 @@ func playersAddHandler(c echo.Context) error {
 	displayNames := params["display_name[]"]
 
 	pds := make([]PlayerDetail, 0, len(displayNames))
+
+	// TODO: bulk insert
+	// retrievePlayer は不要
 	for _, displayName := range displayNames {
 		id, err := dispenseID(ctx)
 		if err != nil {
@@ -818,7 +830,7 @@ func playersAddHandler(c echo.Context) error {
 				id, displayName, false, now, now, err,
 			)
 		}
-		p, err := retrievePlayer(ctx, tenantDB, id)
+		p, err := retrievePlayer(ctx, tenantDB, v.tenantID, id)
 		if err != nil {
 			return fmt.Errorf("error retrievePlayer: %w", err)
 		}
@@ -864,7 +876,7 @@ func playerDisqualifiedHandler(c echo.Context) error {
 			true, now, playerID, err,
 		)
 	}
-	p, err := retrievePlayer(ctx, tenantDB, playerID)
+	p, err := retrievePlayer(ctx, tenantDB, v.tenantID, playerID)
 	if err != nil {
 		// 存在しないプレイヤー
 		if errors.Is(err, sql.ErrNoRows) {
@@ -949,7 +961,7 @@ func competitionFinishHandler(c echo.Context) error {
 	if id == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "competition_id required")
 	}
-	_, err = retrieveCompetition(ctx, tenantDB, id)
+	_, err = retrieveCompetition(ctx, tenantDB, v.tenantID, id)
 	if err != nil {
 		// 存在しない大会
 		if errors.Is(err, sql.ErrNoRows) {
@@ -993,7 +1005,7 @@ func competitionScoreHandler(c echo.Context) error {
 	if competitionID == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "competition_id required")
 	}
-	comp, err := retrieveCompetition(ctx, tenantDB, competitionID)
+	comp, err := retrieveCompetition(ctx, tenantDB, v.tenantID, competitionID)
 	if err != nil {
 		// 存在しない大会
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1034,6 +1046,12 @@ func competitionScoreHandler(c echo.Context) error {
 		return fmt.Errorf("error flockByTenantID: %w", err)
 	}
 	defer fl.Close()
+
+	playerMap, err := retrievePlayerMap(ctx, tenantDB, v.tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to retrievePlayerMap: tenant_id = %d, %w", v.tenantID, err)
+	}
+
 	var rowNum int64
 	playerScoreRows := []PlayerScoreRow{}
 	for {
@@ -1049,15 +1067,12 @@ func competitionScoreHandler(c echo.Context) error {
 			return fmt.Errorf("row must have two columns: %#v", row)
 		}
 		playerID, scoreStr := row[0], row[1]
-		if _, err := retrievePlayer(ctx, tenantDB, playerID); err != nil {
-			// 存在しない参加者が含まれている
-			if errors.Is(err, sql.ErrNoRows) {
-				return echo.NewHTTPError(
-					http.StatusBadRequest,
-					fmt.Sprintf("player not found: %s", playerID),
-				)
-			}
-			return fmt.Errorf("error retrievePlayer: %w", err)
+
+		if _, ok := playerMap[playerID]; !ok {
+			return echo.NewHTTPError(
+				http.StatusBadRequest,
+				fmt.Sprintf("player not found: %s", playerID),
+			)
 		}
 		var score int64
 		if score, err = strconv.ParseInt(scoreStr, 10, 64); err != nil {
@@ -1091,18 +1106,24 @@ func competitionScoreHandler(c echo.Context) error {
 	); err != nil {
 		return fmt.Errorf("error Delete player_score: tenantID=%d, competitionID=%s, %w", v.tenantID, competitionID, err)
 	}
-	for _, ps := range playerScoreRows {
-		if _, err := tenantDB.NamedExecContext(
-			ctx,
-			"INSERT INTO player_score (id, tenant_id, player_id, competition_id, score, row_num, created_at, updated_at) VALUES (:id, :tenant_id, :player_id, :competition_id, :score, :row_num, :created_at, :updated_at)",
-			ps,
-		); err != nil {
-			return fmt.Errorf(
-				"error Insert player_score: id=%s, tenant_id=%d, playerID=%s, competitionID=%s, score=%d, rowNum=%d, createdAt=%d, updatedAt=%d, %w",
-				ps.ID, ps.TenantID, ps.PlayerID, ps.CompetitionID, ps.Score, ps.RowNum, ps.CreatedAt, ps.UpdatedAt, err,
-			)
 
-		}
+	playerScoreMap := map[string]PlayerScoreRow{}
+	for i := range playerScoreRows {
+		playerScoreMap[playerScoreRows[i].PlayerID] = playerScoreRows[i]
+	}
+	scores := []PlayerScoreRow{}
+	for _, score := range playerScoreMap {
+		scores = append(scores, score)
+	}
+	if _, err := tenantDB.NamedExecContext(
+		ctx,
+		"INSERT INTO player_score (id, tenant_id, player_id, competition_id, score, row_num, created_at, updated_at) VALUES (:id, :tenant_id, :player_id, :competition_id, :score, :row_num, :created_at, :updated_at)",
+		scores,
+	); err != nil {
+		return fmt.Errorf(
+			"error Insert player_score: , %w", err,
+		)
+
 	}
 
 	return c.JSON(http.StatusOK, SuccessResult{
@@ -1138,12 +1159,18 @@ func billingHandler(c echo.Context) error {
 		return fmt.Errorf("error Select competition: %w", err)
 	}
 	tbrs := make([]BillingReport, 0, len(cs))
+	reports, err := billingReportByTenant(ctx, tenantDB, v.tenantID)
+	if err != nil {
+		return fmt.Errorf("error billingReportByTenant: %w", err)
+	}
 	for _, comp := range cs {
-		report, err := billingReportByCompetition(ctx, tenantDB, v.tenantID, comp.ID)
-		if err != nil {
-			return fmt.Errorf("error billingReportByCompetition: %w", err)
+		for i := range reports {
+			report := reports[i]
+			if report.CompetitionID != comp.ID {
+				continue
+			}
+			tbrs = append(tbrs, report)
 		}
-		tbrs = append(tbrs, *report)
 	}
 
 	res := SuccessResult{
@@ -1179,7 +1206,7 @@ func playerHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, "role player required")
 	}
 
-	if err := authorizePlayer(ctx, tenantDB, v.playerID); err != nil {
+	if err := authorizePlayer(ctx, tenantDB, v.tenantID, v.playerID); err != nil {
 		return err
 	}
 
@@ -1187,7 +1214,7 @@ func playerHandler(c echo.Context) error {
 	if playerID == "" {
 		return echo.NewHTTPError(http.StatusBadRequest, "player_id is required")
 	}
-	p, err := retrievePlayer(ctx, tenantDB, playerID)
+	p, err := retrievePlayer(ctx, tenantDB, v.tenantID, playerID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return echo.NewHTTPError(http.StatusNotFound, "player not found")
@@ -1232,11 +1259,13 @@ func playerHandler(c echo.Context) error {
 	}
 
 	psds := make([]PlayerScoreDetail, 0, len(pss))
+	compMap := map[string]*CompetitionRow{}
+	for i := range cs {
+		comp := cs[i]
+		compMap[comp.ID] = &comp
+	}
 	for _, ps := range pss {
-		comp, err := retrieveCompetition(ctx, tenantDB, ps.CompetitionID)
-		if err != nil {
-			return fmt.Errorf("error retrieveCompetition: %w", err)
-		}
+		comp := compMap[ps.CompetitionID]
 		psds = append(psds, PlayerScoreDetail{
 			CompetitionTitle: comp.Title,
 			Score:            ps.Score,
@@ -1283,7 +1312,7 @@ func competitionRankingHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, "role player required")
 	}
 
-	if err := authorizePlayer(ctx, tenantDB, v.playerID); err != nil {
+	if err := authorizePlayer(ctx, tenantDB, v.tenantID, v.playerID); err != nil {
 		return err
 	}
 
@@ -1293,7 +1322,7 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 
 	// 大会の存在確認
-	competition, err := retrieveCompetition(ctx, tenantDB, competitionID)
+	competition, err := retrieveCompetition(ctx, tenantDB, v.tenantID, competitionID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return echo.NewHTTPError(http.StatusNotFound, "competition not found")
@@ -1344,6 +1373,10 @@ func competitionRankingHandler(c echo.Context) error {
 	}
 	ranks := make([]CompetitionRank, 0, len(pss))
 	scoredPlayerSet := make(map[string]struct{}, len(pss))
+	playerMap, err := retrievePlayerMap(ctx, tenantDB, v.tenantID)
+	if err != nil {
+		return fmt.Errorf("failed to retrievePlayerMap: %w", err)
+	}
 	for _, ps := range pss {
 		// player_scoreが同一player_id内ではrow_numの降順でソートされているので
 		// 現れたのが2回目以降のplayer_idはより大きいrow_numでスコアが出ているとみなせる
@@ -1351,10 +1384,7 @@ func competitionRankingHandler(c echo.Context) error {
 			continue
 		}
 		scoredPlayerSet[ps.PlayerID] = struct{}{}
-		p, err := retrievePlayer(ctx, tenantDB, ps.PlayerID)
-		if err != nil {
-			return fmt.Errorf("error retrievePlayer: %w", err)
-		}
+		p := playerMap[ps.PlayerID]
 		ranks = append(ranks, CompetitionRank{
 			Score:             ps.Score,
 			PlayerID:          p.ID,
@@ -1416,7 +1446,7 @@ func playerCompetitionsHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusForbidden, "role player required")
 	}
 
-	if err := authorizePlayer(ctx, tenantDB, v.playerID); err != nil {
+	if err := authorizePlayer(ctx, tenantDB, v.tenantID, v.playerID); err != nil {
 		return err
 	}
 	return competitionsHandler(c, v, tenantDB)
@@ -1520,7 +1550,7 @@ func meHandler(c echo.Context) error {
 	}
 
 	ctx := context.Background()
-	p, err := retrievePlayer(ctx, tenantDB, v.playerID)
+	p, err := retrievePlayer(ctx, tenantDB, v.tenantID, v.playerID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return c.JSON(http.StatusOK, SuccessResult{

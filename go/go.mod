@@ -3,6 +3,7 @@ module github.com/isucon/isucon12-qualify/webapp/go
 go 1.18
 
 require (
+	cloud.google.com/go/profiler v0.3.0
 	github.com/go-sql-driver/mysql v1.6.0
 	github.com/gofrs/flock v0.8.1
 	github.com/jmoiron/sqlx v1.3.5
@@ -10,13 +11,13 @@ require (
 	github.com/labstack/gommon v0.3.1
 	github.com/lestrrat-go/jwx/v2 v2.0.2
 	github.com/mattn/go-sqlite3 v1.14.13
+	github.com/oklog/ulid/v2 v2.1.0
 	github.com/shogo82148/go-sql-proxy v0.6.1
 )
 
 require (
 	cloud.google.com/go v0.100.2 // indirect
 	cloud.google.com/go/compute v1.6.1 // indirect
-	cloud.google.com/go/profiler v0.3.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/goccy/go-json v0.9.7 // indirect
 	github.com/golang-jwt/jwt v3.2.2+incompatible // indirect
