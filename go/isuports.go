@@ -103,7 +103,7 @@ func createTenantDB(id int64) error {
 
 // システム全体で一意なIDを生成する
 func dispenseID(ctx context.Context) (string, error) {
-	return ulid.Make().String(), nil
+	return strings.ToLower(ulid.Make().String()), nil
 }
 
 // 全APIにCache-Control: privateを設定する
@@ -436,12 +436,12 @@ type PlayerScoreRow struct {
 	UpdatedAt     int64  `db:"updated_at"`
 }
 
-var gmu struct{
+var gmu struct {
 	mu sync.Mutex
-	m map[int64]*sync.RWMutex
+	m  map[int64]*sync.RWMutex
 }
 
-func lockByTenantID(tenantID int64) (*sync.RWMutex) {
+func lockByTenantID(tenantID int64) *sync.RWMutex {
 	gmu.mu.Lock()
 	defer gmu.mu.Unlock()
 
@@ -454,7 +454,7 @@ func lockByTenantID(tenantID int64) (*sync.RWMutex) {
 	return mu
 }
 
-func rlockByTenantID(tenantID int64) (*sync.RWMutex) {
+func rlockByTenantID(tenantID int64) *sync.RWMutex {
 	gmu.mu.Lock()
 	defer gmu.mu.Unlock()
 
@@ -817,16 +817,16 @@ func playersAddHandler(c echo.Context) error {
 		}
 
 		ps = append(ps, PlayerRow{
-			TenantID: v.tenantID,
-			ID: id,
-			DisplayName: displayName,
+			TenantID:       v.tenantID,
+			ID:             id,
+			DisplayName:    displayName,
 			IsDisqualified: false,
-			CreatedAt: now,
-			UpdatedAt: now,
+			CreatedAt:      now,
+			UpdatedAt:      now,
 		})
 		pds = append(pds, PlayerDetail{
-			ID: id,
-			DisplayName: displayName,
+			ID:             id,
+			DisplayName:    displayName,
 			IsDisqualified: false,
 		})
 	}
